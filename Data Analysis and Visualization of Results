@@ -1,0 +1,333 @@
+
+#--------------------------------------#
+#-----GLMM for Hemorrhagic Disease-----#
+#-----Analysis for 2000-2014 in -------#
+#-----Eastern United States------------#
+#---Created by Sonja Christensen ------# 
+#----and David Williams----------------#
+#--------------------------------------#
+
+#--Libraries--#
+#-------------#
+
+library(plyr)
+library(readxl)
+require(lme4)
+library(AICcmodavg)
+library(lme4)
+library(glmmML)
+library(xlsx)
+require(rgdal)
+library(sp) 
+library(effects)
+library(AUC)
+library(interplot)
+
+#--Load data--#
+#-------------#
+
+counties <- read.csv("EHDCounty_pnt.csv")
+hd <- read.csv("HD2000_2014_23states_fxsc.csv")
+Drought <- read.csv("Drought.csv")
+Physio <- read_excel("C:/Users/chris625/Dropbox/EHD/HD/Physio.xlsx")
+wtld2006 <- read_excel("C:/Users/chris625/Dropbox/EHD/HD/wtld2006.xlsx", 
+                       col_types = c("text", "numeric", "numeric", 
+                                     "numeric", "numeric"))
+
+#--Data clean--#
+#--------------#
+
+counties$county_state <- paste(counties$NAME, counties$STATE_NAME, sep=" ")
+
+#Clean HD data by county names to merge by FIPS
+hd <- subset(hd,is.na(hd$X0))
+hd <- subset(hd,hd$State!="")
+hd <- subset(hd,hd$County!="NONE")
+hd <- subset(hd,hd$County!="None Reported")
+hd <- subset(hd,hd$County!="Unknown")
+hd <- subset(hd,hd$County!="UNKNOWN")
+hd <- subset(hd,hd$State1!="Minnesota" & hd$State1!="New York" & hd$State1!="Vermont")
+hd$county_state <- paste(hd$County, hd$State1, sep=" ")
+
+#Note: "all.y" means that it is only keepning all the data from y (HD)
+new <- merge(counties,hd, by="county_state", all.y=TRUE) 
+
+#to search for duplicate entries in the HD data set by year and county
+new$code <- (new$FIPS.x*10000) + new$Year
+#will return all the duplicates, only look at last field row
+new[duplicated(new$code),] 
+
+for(i in 2000:2014) {
+  temp <- subset(new, new$Year == i)
+  temp2 <- merge(temp, counties, by="county_state", all = TRUE)
+  temp2$Year = i
+  if (i == 2000) {
+    bind <- temp2 
+  } else {
+    bind <- rbind(bind, temp2)
+  }
+}
+
+###Now add in zero's for N/A's for "bind"
+bind$HDMORT [is.na(bind$HDMORT)] <- 0
+#and make a unique ID
+bind$unqcode <- (bind$FIPS*10000) + bind$Year
+#delete some unused columns
+bind$FIPS.x <- NULL
+bind$FIPS.y <- NULL 
+
+#Now make the unique ID for analysis. FIPS + Year = unique code = "unqcode"
+Drought$unqcode <- (Drought$FIPS*10000) + Drought$Year 
+
+#Merge data files by FIPS (with differing colnames)
+Alldata <-merge(bind, Drought, by = "unqcode", all = TRUE) ##This caused problems when done with only FIPS. Returns 411750 Obs, which is 15 x the bind obs. Year is not specified (add year in excel)
+
+##Double check the total values 
+#This changes the name of the column from FIPS.x to FIPS for better joining or merging
+names(Alldata) <- sub('FIPS.x', 'FIPS', names(Alldata)) 
+summary(Alldata)
+
+#Merge Physio. Note: "left" specifies the priority dataframe, the first data frame Alldata
+Alldatac <- join(Alldata, Physio, by='FIPS', type='left', match='all') 
+summary(Alldatac)
+
+#need to join/merge the wetland % cover by county for 2006 to the Alldata file
+Alldatacombo <- join(Alldatac, wtld2006, by='FIPS', type='left', match='all') 
+summary(Alldatacombo)
+
+
+#Incorporate time lag term where T in year i and county j represents the status of HD the previous year (year 1 (2000) then = NA)
+TAuto<-c(NA, rep(0,length(Alldatacombo$FIPS)-1))
+
+for (i in 1:(length(Alldatacombo$FIPS)-1)){
+  if (Alldatacombo$HDMORT[i]==1 & Alldatacombo$Year.y[i] %in% c(2000:2013)){
+    #TAuto[i+1] <- Alldatacombo[Alldatacombo$FIPS==i,]
+    TAuto[i+1] <- 1
+  }else if (Alldatacombo$Year.y[i] %in% 2014){
+    TAuto[i+1] <- NA
+  }}
+#Review Data for Accuracy
+head(TAuto)
+head(Alldatacombo$HDMORT)
+
+Alldatacombo<-cbind.data.frame(Alldatacombo,TAuto)
+Alldatacombo<-Alldatacombo[,-71]
+
+#Prep variables as factors and rename. Note: adapted from Zuur et al. 10.2.2 example of binomial GLM, creating factors for year, county, and state
+Alldatacombo$fState.y <- factor(Alldatacombo$State.y)
+Alldatacombo$fYear <- factor(Alldatacombo$Year.y)
+Alldatacombo$funqcode <- factor(Alldatacombo$unqcode)
+names(Alldatacombo) <- sub('MEAN', 'Wetland', names(Alldatacombo))
+names(Alldatacombo) <- sub('MAJORITY', 'physio', names(Alldatacombo))
+Alldatacombo$physio <- factor(Alldatacombo$physio)
+names(Alldatacombo) <- sub('CENTROID_Y.y', 'Latitude', names(Alldatacombo))
+
+#Note: replace NA's with zeros and it doesn't affect the beta's or variance 
+
+summary(Alldatacombo$Wetland)
+hist(Alldatacombo$Wetland)
+#Save data
+write.table(Alldatacombo, "C:/Users/chris625/Dropbox/EHD/HD/AlldataFinal1.txt", sep="\t")
+#to check on data
+plot(Alldatacombo$HDMORT) 
+plot(TAuto)
+
+#-----------------------------------#
+#----Analyis and model selection----#
+#-----------------------------------#
+
+#GLM Models with fixed effects only - investigate these first to evaluate inclusion of parameters with AIC
+HD1 <- glm(HDMORT ~ fState.y + fYear + SUM + physio + Wetland + TAuto,
+           family = binomial, data = Alldatacombo)
+
+FULLFE1 <-  glm(HDMORT ~ SUM*Latitude + SUM + Latitude + CENTROID_X.y + physio + Wetland + TAuto + fState.y + fYear, family = binomial, data = Alldatacombo)
+summary(FULLFE1)
+
+FULLFE2 <-  glm(HDMORT ~ SUM*Latitude + SUM*Wetland + SUM + Latitude + CENTROID_X.y + physio + Wetland + TAuto + fState.y + fYear, family = binomial, data = Alldatacombo)
+summary(FULLFE2)
+
+Candsfe <- list(FULLFE1, FULLFE2)
+
+Model.names.glmm <- c("FULLFE1", "FULLFE2")
+
+aictab(cand.set = Candsfe, modnames = Model.names.glmm, sort = TRUE)
+
+#GLMM to evaluate random effects structure
+FULLRState <- glmer(HDMORT ~ SUM*Latitude + SUM*Wetland + SUM + Latitude + CENTROID_X.y + physio + Wetland + TAuto + (1 | fState.y), family = binomial, nAGQ = 0, data = Alldatacombo)
+summary(FULLRState)
+FULLRYear <- glmer(HDMORT ~ SUM*Latitude + SUM*Wetland + SUM + Latitude + CENTROID_X.y + physio + Wetland + TAuto + (1 | fYear), family = binomial, nAGQ = 0, data = Alldatacombo)
+summary(FULLRYear)
+FULL2 <-  glmer(HDMORT ~ SUM*Latitude + SUM*Wetland + SUM + Latitude + CENTROID_X.y + physio + Wetland + (1 | fYear) + (1 | fState.y) + TAuto, family = binomial, nAGQ = 0, data = Alldatacombo)
+summary(FULL2)
+
+Cands <- list(FULLRState, FULLRYear, FULL2)
+
+Model.names.glmm <- c("FULLRState", "FULLRYear", "FULL2")
+
+aictab(cand.set = Cands, modnames = Model.names.glmm, sort = TRUE)
+
+##Single covariates models to evaluate fit of candidate predictor variables and hypothetical models
+HD2 <- glmer(HDMORT ~ SUM + (1 | fState.y) + (1 | fYear), family = binomial, nAGQ = 0, data = Alldatacombo)  ##Drought
+HD4 <- glmer(HDMORT ~ D0 + D1 + D2 + D3 + D4 + (1 | fYear) + (1 | fState.y), family = binomial, nAGQ = 0, data = Alldatacombo) ##Drought categories 
+HD5 <- glmer(HDMORT ~ Latitude + D0 + D1 + D2 + D3 + D4 + (1 | fYear) + (1 | fState.y), family = binomial, nAGQ = 0, data = Alldatacombo) ##Latitude + Drought Categories
+HD6 <- glmer(HDMORT ~ TAuto + (1 | fYear) + (1 | fState.y), family = binomial, nAGQ = 0, data = Alldatacombo) #Temporal autocorrelation
+HD7 <- glmer(HDMORT ~ Latitude + (1 | fYear) + (1 | fState.y), family = binomial, nAGQ = 0, data = Alldatacombo) #Latitude
+HD9 <- glmer(HDMORT ~ SUM*Latitude + SUM + Latitude + (1 | fYear) + (1 | fState.y), family = binomial, nAGQ = 0, data = Alldatacombo) #Drought Latitude interaction
+HD10 <- glmer(HDMORT ~ (1 | fYear) + (1 | fState.y), family = binomial, nAGQ = 0, data = Alldatacombo) #Intercepts only Null model
+HD12 <- glmer(HDMORT ~ CENTROID_X.y*SUM + SUM + CENTROID_X.y + (1 | fYear) + (1 | fState.y), family = binomial, nAGQ = 0, data = Alldatacombo) #Longitude Drought interaction 
+HD13 <- glmer(HDMORT ~ CENTROID_X.y + (1 | fYear) + (1 | fState.y), family = binomial, nAGQ = 0, data = Alldatacombo) #Longitude
+HD17 <- glmer(HDMORT ~ SUM*Wetland + SUM + Wetland + (1 | fYear) + (1 | fState.y), family = binomial, nAGQ = 0, data = Alldatacombo) #Drought Wetland Interaction
+HD18 <- glmer(HDMORT ~ Wetland + (1 | fYear) + (1 | fState.y), family = binomial, nAGQ = 0, data = Alldatacombo) #Wetland
+HD23 <- glmer(HDMORT ~ physio + (1 | fYear) + (1 | fState.y), family = binomial, nAGQ = 0, data = Alldatacombo) #Physio
+###Take a look at simple models
+Cands <- list(HD2, HD4, HD5, HD6, HD7, HD9, HD10, HD12, HD13, HD17, HD18, HD23)
+Model.names.glmm <- c("Drought","Drought categories", "Latitude + Drought Categories", "Temporal autocorrelation","Latitude","Drought Latitude interaction","Intercepts only","Longitude Drought interaction",
+                      "Longitude", "Drought Wetland Interaction","Wetland", "Physio")
+aictab(cand.set = Cands, modnames = Model.names.glmm, sort = TRUE)
+
+#Increase complexity for additional ecologically relevant hypotheses
+HD3 <- glmer(HDMORT ~ SUM + Latitude + TAuto + (1 | fYear) + (1 | fState.y), family = binomial, nAGQ = 0, data = Alldatacombo) #Drought + Latitude + TA
+HD8 <- glmer(HDMORT ~ Latitude + TAuto + (1 | fYear) + (1 | fState.y), family = binomial, nAGQ = 0, data = Alldatacombo) ##Latitude + TA
+HD11 <- glmer(HDMORT ~ SUM + CENTROID_X.y + TAuto + (1 | fYear) + (1 | fState.y), family = binomial, nAGQ = 0, data = Alldatacombo) #Drought + Long +TA
+HD16 <- glmer(HDMORT ~ SUM*Latitude + SUM + Latitude + Wetland + TAuto + (1 | fYear) + (1 | fState.y), family = binomial, nAGQ = 0, data = Alldatacombo) #Drought Lat Inter, + Wetland + Tauto
+HD19 <- glmer(HDMORT ~ Latitude + Wetland + (1 | fYear) + (1 | fState.y), family = binomial, nAGQ = 0, data = Alldatacombo) #Lat + Wetland + TA
+HD20 <- glmer(HDMORT ~ SUM + Latitude + Wetland + TAuto + (1 | fYear) + (1 | fState.y), family = binomial, nAGQ = 0, data = Alldatacombo) #Drought + Latitude + Wetland + TA
+HD21 <- glmer(HDMORT ~ SUM*Wetland + SUM + Wetland + Latitude + (1 | fYear) + (1 | fState.y), family = binomial, nAGQ = 0, data = Alldatacombo) #Drought Wetland Inter + Latitude
+HD24 <- glmer(HDMORT ~ SUM*Latitude + SUM + Latitude + physio + (1 | fYear) + (1 | fState.y) + TAuto, family = binomial, nAGQ = 0, data = Alldatacombo) #Drought Lat Inter, + physio
+HD25 <- glmer(HDMORT ~ SUM*physio + SUM + physio + Latitude + (1 | fYear) + (1 | fState.y) + TAuto, family = binomial, nAGQ = 0, data = Alldatacombo) #Drought Physio Inter + Lat####Ignore
+HD26 <- glmer(HDMORT ~ SUM + physio + Latitude + (1 | fYear) + (1 | fState.y) + TAuto, family = binomial, nAGQ = 0, data = Alldatacombo) #Drought + Physio + Lat
+HD27 <- glmer(HDMORT ~ SUM*Latitude + SUM + Latitude + CENTROID_X.y + (1 | fYear) + (1 | fState.y) + TAuto, family = binomial, nAGQ = 0, data = Alldatacombo) #Drought Lat Inter, + Long
+HD28 <- glmer(HDMORT ~ SUM*Latitude + SUM + Latitude + physio + Wetland + (1 | fYear) + (1 | fState.y) + TAuto, family = binomial, nAGQ = 0, data = Alldatacombo) #Drought Lat Inter, + wetland + Physio
+HD29 <- glmer(HDMORT ~ SUM*Latitude + SUM + Latitude + CENTROID_X.y + physio + Wetland + (1 | fYear) + (1 | fState.y) + TAuto, family = binomial, nAGQ = 0, data = Alldatacombo) #Drought Lat Inter + Wetland + Physio + long
+HD30 <- glmer(HDMORT ~ SUM*Latitude + SUM*Wetland + SUM + Latitude + Wetland + (1 | fYear) + (1 | fState.y) + TAuto, family = binomial, nAGQ = 0, data = Alldatacombo) #Drought Lat Inter, Drought Wetland Inter #Drought Lat Inter, Drought Wetland Inter + Physio
+HD31 <-  glmer(HDMORT ~ SUM + Latitude + CENTROID_X.y + physio + Wetland + (1 | fYear) + (1 | fState.y) + TAuto, family = binomial, nAGQ = 0, data = Alldatacombo) #Drought + Lat + Long + Wetland + Physio
+HD32 <- glmer(HDMORT ~ SUM*Latitude + SUM*Wetland + SUM + Latitude + Wetland + physio + (1 | fYear) + (1 | fState.y) + TAuto, family = binomial, nAGQ = 0, data = Alldatacombo) ##full model except Longitude
+HD33 <-  glmer(HDMORT ~ SUM*Wetland + SUM + Latitude + CENTROID_X.y + physio + Wetland + (1 | fYear) + (1 | fState.y) + TAuto, nAGQ = 0, family = binomial, data = Alldatacombo) #Drought Wetland Inter + Lat + Long + Physio
+HD34 <-  glmer(HDMORT ~ SUM*Wetland + SUM + Latitude + Wetland + (1 | fYear) + (1 | fState.y) + TAuto, family = binomial, nAGQ = 0, data = Alldatacombo) #Drought Wetland Inter + Tauto
+HD35 <-  glmer(HDMORT ~ SUM + Latitude + CENTROID_X.y + Wetland + (1 | fYear) + (1 | fState.y) + TAuto, family = binomial, nAGQ = 0, data = Alldatacombo) #Drought + Lat + Long + Wetland + ta
+HD36 <-  glmer(HDMORT ~ SUM + Latitude + CENTROID_X.y + physio + (1 | fYear) + (1 | fState.y) + TAuto, family = binomial, nAGQ = 0, data = Alldatacombo) #Drought + Lat + Long + physio +ta
+HD37 <-  glmer(HDMORT ~ SUM + Latitude + physio + Wetland + (1 | fYear) + (1 | fState.y) + TAuto, family = binomial, nAGQ = 0, data = Alldatacombo) #Drought + Lat + physio + Wetland 
+HD38 <-  glmer(HDMORT ~ SUM + Wetland + (1 | fYear) + (1 | fState.y) + TAuto, family = binomial, nAGQ = 0, data = Alldatacombo) # Drought + Wetland
+HD15 <-  glmer(HDMORT ~ SUM + physio + (1 | fYear) + (1 | fState.y) + TAuto, family = binomial, nAGQ = 0, data = Alldatacombo) #Drought + Physio
+HD14 <-  glmer(HDMORT ~ physio + Wetland + (1 | fYear) + (1 | fState.y) + TAuto, family = binomial, nAGQ = 0, data = Alldatacombo) #wetland + physio
+
+
+###MODEL SELECTION#####
+Cands <- list(HD2, HD3, HD4, HD5, HD6, HD7, HD8, HD9, HD10, HD11, HD12, HD13, HD14, HD15, HD16, HD17, HD18, HD19, HD20, HD21, HD23,
+              HD24, HD25, HD26, HD27, HD28, HD29, HD30, HD31, HD32, HD33, HD34, HD35, HD36, HD37, HD38, FULL2)
+
+Model.names.glmm <- c("HD2", "HD3", "HD4", "HD5", "HD6", "HD7", "HD8", "HD9", "HD10", "HD11", "HD12", "HD13", "wetland + physio", "Drought + Physio", "HD16", "HD17", 
+                      "HD18", "HD19", "HD20", "HD21", "HD23", "Drought Lat Inter, + physio", "HD25", "HD26", "HD27", "Drought Lat Inter, + wetland + Physio", "Drought Lat Inter + Wetland + Physio + long",
+                      "Drought Lat Inter, Drought Wetland Inter", "Drought + Lat + Long + Wetland + Physio", "Drought Lat Inter, Drought Wetland Inter + Physio", "Drought Wetland Inter + Lat + Long + Physio", "Drought Wetland Inter", 
+                      "Drought + Lat + Long + Wetland", "Drought + Lat + Long + physio", "Drought + Lat + physio + Wetland ", "Drought + Wetland", "Global Model")
+
+aictab(cand.set = Cands, modnames = Model.names.glmm, sort = TRUE)
+
+#BEST MODEL
+summary(HD32) 
+#Without Random effects (model TOPFE = abbreviation for Top Fixed Effects Model) 
+TOPFE <- glm(HDMORT ~ SUM*Latitude + SUM*Wetland + SUM + Latitude + Wetland + physio + TAuto, family = binomial, data = Alldatacombo)
+summary(TOPFE)
+
+#saving data
+saveRDS(HD32, file = "HD32.rds")
+saveRDS(Alldatacombo, file = "Alldatacombo.rds")
+
+#------------------------------------------------------------------------#
+#---Evaluation and visualization of predictor variables for best model---#
+#------------------------------------------------------------------------#
+
+#Look at estimates and variance table
+se <- sqrt(diag(vcov(HD32)))
+# table of estimates with 95% CI
+(tab <- cbind(Est = fixef(HD32), LL = fixef(HD32) - 1.96 * se, UL = fixef(HD32) + 1.96 * se))
+
+#--Visualizing Drought Severity Index data--#
+
+#calculate variance over years for each county
+drought.var.by.county <- aggregate(Drought$SUM, list(FIPS = Drought$FIPS), FUN=var)
+
+#map variance in drought values
+shape <- readOGR(dsn = "./gis", layer = "EHD_counties")
+#next line needed to fix problem with matching FIPS, Drought.csv dropped leading zeroes in FIPS
+shape$FIPS <- as.integer(paste(shape$FIPS))
+#plot(shape)
+new.shape <- merge(shape,drought.var.by.county, by="FIPS")
+plot(new.shape)
+spplot(new.shape, "x", main = "Variance in Drought Index (2000-2014)", col = "transparent")
+
+#calculate mean drought value for each county
+drought.mean.by.county <- aggregate(Drought$SUM, list(FIPS = Drought$FIPS), FUN=mean)
+
+#histogram of mean drought values by county
+hist(drought.mean.by.county$x, breaks=20, col="gray", xlab="Mean drought index by county", main="")
+#or
+plot(density(drought.mean.by.county$x))
+
+#map mean drought values by county
+new.shape2 <- merge(shape,drought.mean.by.county, by="FIPS")
+
+spplot(new.shape2, "x", ylab = "Mean Drought Severity Index Value", main = "Mean in Drought Index (2000-2014)", col = "transparent")
+
+
+#---Mapping Drought Variable---#
+
+#for Drought (SUM) and related interacting variables
+plot(allEffects(HD32))
+SUM1.HD32 <- predictorEffect("SUM", HD32)
+plot(SUM1.HD32)
+brief(SUM1.HD32$model.matrix)
+summary(HD32)
+
+#---Estimate Area Under the Curve for fixed effects---#
+prob <- exp(TOPFE$linear.predictor)/(1+exp(TOPFE$linear.predictor)) #Logit scale
+table(prob)
+summary(prob)
+hist(prob)
+auc(roc(prob,as.factor(TOPFE$model$HDMORT)))
+
+#------------------#
+#---plot effects---#
+#------------------#
+
+#Effects plot of Drought Severity interaction with Latitude explaining probability of HD mortality in a given county year
+plot(effect("SUM*Latitude", HD32, xlevels=list(age=0:500)), 
+     main = "The Effect of Drought Severity on the Probability of HD Mortality Across Latitudes",
+     xlab="Drought Severity", ylab="Probability(HD Mortality)", 
+     colors=c("brown"),rug=FALSE)
+
+#Plotting interaction terms with marginal effects plot for drought severity and latitude interaction
+interplot(m = HD32, var1 = "SUM", var2 = "Latitude", hist = TRUE)  +   
+  xlab("County Latitude") +
+  ylab("Estimated Coefficient for Drought Severity") +
+  # Change the background
+  theme_bw() +
+  # Add the title
+  ggtitle("The marginal effect of latitude and drought on the probablity of HD") +
+  theme(plot.title = element_text(face="bold")) +
+  aes(color = "pink") + theme(legend.position="none") +
+  geom_hline(yintercept = 0, linetype = "dashed")
+
+#Now, for another predictor effect:
+plot(effect("physio", HD32, xlevels=list(1:4)), 
+     main = "The Effect of Drought Severity on the Probability of HD Mortality by Physiographic Region",
+     xlab="Division", ylab="Probability(HD Mortality)")
+
+
+#Now for wetland and Drought interaction 
+plot(effect("SUM*Wetland", HD32, xlevels=list(age=-7:7)), 
+     main = "The Effect of Drought Severity on the Probability of HD Mortality Across % Wetland",
+     xlab="Drought Severity", ylab="Probability(HD Mortality)", 
+     colors=c("brown"),rug=FALSE)
+
+##Plotting interaction terms with marginal effects plot for drought severity and wetland interaction
+interplot(m = HD32, var1 = "SUM", var2 = "Wetland", hist = TRUE)  +   
+  xlab("% Wetland") +
+  ylab("Estimated Coefficient for Drought Severity") +
+  # Change the background
+  theme_bw() +
+  # Add the title
+  ggtitle("The marginal effect of % wetland and drought on the probablity of HD ") +
+  theme(plot.title = element_text(face="bold")) +
+  aes(color = "pink") + theme(legend.position="none") +
+  geom_hline(yintercept = 0, linetype = "dashed")
