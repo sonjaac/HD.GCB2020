@@ -23,6 +23,7 @@ library(effects)
 library(AUC)
 library(interplot)
 
+#-------------#
 #--Load data--#
 #-------------#
 
@@ -33,7 +34,7 @@ Physio <- read_excel("C:/Users/chris625/Dropbox/EHD/HD/Physio.xlsx")
 wtld2006 <- read_excel("C:/Users/chris625/Dropbox/EHD/HD/wtld2006.xlsx", 
                        col_types = c("text", "numeric", "numeric", 
                                      "numeric", "numeric"))
-
+#--------------#
 #--Data clean--#
 #--------------#
 
