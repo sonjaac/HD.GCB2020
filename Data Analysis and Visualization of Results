@@ -233,6 +233,13 @@ summary(TOPFE)
 saveRDS(HD32, file = "HD32.rds")
 saveRDS(Alldatacombo, file = "Alldatacombo.rds")
 
+#---Estimate Area Under the Curve for fixed effects---#
+prob <- exp(TOPFE$linear.predictor)/(1+exp(TOPFE$linear.predictor)) #Logit scale
+table(prob)
+summary(prob)
+hist(prob)
+auc(roc(prob,as.factor(TOPFE$model$HDMORT)))
+
 #------------------------------------------------------------------------#
 #---Evaluation and visualization of predictor variables for best model---#
 #------------------------------------------------------------------------#
@@ -242,7 +249,7 @@ se <- sqrt(diag(vcov(HD32)))
 # table of estimates with 95% CI
 (tab <- cbind(Est = fixef(HD32), LL = fixef(HD32) - 1.96 * se, UL = fixef(HD32) + 1.96 * se))
 
-#--Visualizing Drought Severity Index data--#
+#--Mapping Drought Severity Index data--#
 
 #calculate variance over years for each county
 drought.var.by.county <- aggregate(Drought$SUM, list(FIPS = Drought$FIPS), FUN=var)
@@ -269,26 +276,16 @@ new.shape2 <- merge(shape,drought.mean.by.county, by="FIPS")
 
 spplot(new.shape2, "x", ylab = "Mean Drought Severity Index Value", main = "Mean in Drought Index (2000-2014)", col = "transparent")
 
+#------------------#
+#---plot effects---#
+#------------------#
 
-#---Mapping Drought Variable---#
-
-#for Drought (SUM) and related interacting variables
+#All plots for Drought (SUM) and related interacting variables
 plot(allEffects(HD32))
 SUM1.HD32 <- predictorEffect("SUM", HD32)
 plot(SUM1.HD32)
 brief(SUM1.HD32$model.matrix)
 summary(HD32)
-
-#---Estimate Area Under the Curve for fixed effects---#
-prob <- exp(TOPFE$linear.predictor)/(1+exp(TOPFE$linear.predictor)) #Logit scale
-table(prob)
-summary(prob)
-hist(prob)
-auc(roc(prob,as.factor(TOPFE$model$HDMORT)))
-
-#------------------#
-#---plot effects---#
-#------------------#
 
 #Effects plot of Drought Severity interaction with Latitude explaining probability of HD mortality in a given county year
 plot(effect("SUM*Latitude", HD32, xlevels=list(age=0:500)), 
